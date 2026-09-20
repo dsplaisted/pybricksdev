@@ -534,6 +534,32 @@ class FilesPut(Tool):
         print(f"Wrote {len(data)} bytes to {path} on the hub.")
 
 
+class FilesRemove(Tool):
+    def add_parser(self, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(
+            "remove",
+            help="delete a file from a hub",
+        )
+        parser.tool = self
+        _add_connection_arguments(parser)
+        parser.add_argument(
+            "path",
+            metavar="<path>",
+            nargs="+",
+            help="file on the hub to delete",
+        )
+
+    async def run(self, args: argparse.Namespace):
+        hub = await _connect_hub(args.conntype, args.name, args.timeout)
+
+        try:
+            for target in args.path:
+                await hub.remove_flash_file(target)
+                print(f"Deleted {target}.")
+        finally:
+            await hub.disconnect()
+
+
 class Files(Tool):
     def add_parser(self, subparsers: argparse._SubParsersAction):
         self.parser = subparsers.add_parser(
@@ -547,7 +573,7 @@ class Files(Tool):
             help="the action to take",
         )
 
-        for tool in FilesList(), FilesGet(), FilesPut():
+        for tool in FilesList(), FilesGet(), FilesPut(), FilesRemove():
             tool.add_parser(self.subparsers)
 
     def run(self, args: argparse.Namespace):

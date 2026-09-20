@@ -874,6 +874,20 @@ class PybricksHub:
             bytes([Command.WRITE_FLASH_FILE, FlashFileWriteOp.CLOSE])
         )
 
+    async def remove_flash_file(self, path: str) -> None:
+        """Deletes a file from the external flash file system of the hub.
+
+        Args:
+            path: The file to delete.
+
+        Raises:
+            BleakError: The hub could not delete it, such as when there is no
+                file with that path.
+        """
+        await self._flash_file_command(
+            bytes([Command.WRITE_FLASH_FILE, FlashFileWriteOp.REMOVE]), path.encode()
+        )
+
     async def race_power_button_press(self, awaitable: Awaitable[T]) -> T:
         """
         Races an awaitable against the user pressing the power button of the hub.

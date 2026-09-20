@@ -139,8 +139,9 @@ class Command(IntEnum):
     Writes a file on the external flash file system of the hub.
 
     The first byte of the payload selects the operation, which is one of
-    :class:`FlashFileWriteOp`. ``OPEN`` is followed by the path of the file,
-    ``APPEND`` by the bytes to add to it, and ``CLOSE`` takes nothing.
+    :class:`FlashFileWriteOp`. ``OPEN`` and ``REMOVE`` are followed by the
+    path of the file, ``APPEND`` by the bytes to add to it, and ``CLOSE``
+    takes nothing.
 
     .. availability:: Since Pybricks protocol v1.6.0.
     """
@@ -172,6 +173,9 @@ class FlashFileWriteOp(IntEnum):
 
     CLOSE = 2
     """Finishes writing the open file."""
+
+    REMOVE = 3
+    """Deletes the file, which the path follows."""
 
 
 class FlashFileReadOp(IntEnum):
