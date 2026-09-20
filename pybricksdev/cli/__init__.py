@@ -183,7 +183,15 @@ async def _connect_hub(conntype: str, name: str | None, timeout: float = 10):
                 and dev.product.endswith("Pybricks")
             )
 
-        device = find_usb(custom_match=is_pybricks_usb)
+        # Windows has no libusb of its own, but the package carries one.
+        try:
+            import libusb_package
+
+            backend = libusb_package.get_libusb1_backend()
+        except ImportError:
+            backend = None
+
+        device = find_usb(custom_match=is_pybricks_usb, backend=backend)
 
         if device is None:
             print("Pybricks Hub not found.", file=sys.stderr)

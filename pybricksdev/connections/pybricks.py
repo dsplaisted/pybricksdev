@@ -18,8 +18,9 @@ from reactivex.subject import BehaviorSubject, Subject
 from tqdm.auto import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 from usb.core import Device as USBDevice
-from usb.core import Endpoint, Interface, USBTimeoutError
+from usb.core import Endpoint, Interface, USBError, USBTimeoutError
 from usb.util import (
+    claim_interface,
     CTRL_IN,
     CTRL_RECIPIENT_INTERFACE,
     CTRL_TYPE_CLASS,
@@ -1187,11 +1188,19 @@ class PybricksHubUSB(PybricksHub):
             == ENDPOINT_OUT,
         )
 
+        # Clearing halt needs the interface to be claimed, which does not
+        # happen by itself until the first transfer.
+        claim_interface(self._device, intf)
+
         # Clearing halt (even if not stalled) resets the even/odd state on the
         # endpoints in case it was left in an invalid state by a previous
-        # connection.
-        self._ep_in.clear_halt()
-        self._ep_out.clear_halt()
+        # connection. Not every backend supports it, and a connection that has
+        # just been opened is not in a bad state anyway, so carry on without it.
+        try:
+            self._ep_in.clear_halt()
+            self._ep_out.clear_halt()
+        except USBError:
+            logger.debug("could not clear halt on the endpoints", exc_info=True)
 
         # There is 1 byte overhead for PybricksUsbMessageType
         self._max_write_size = self._ep_out.wMaxPacketSize - 1
