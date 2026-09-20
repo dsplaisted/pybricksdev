@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Added `pybricksdev files list|get|put` for working with the files stored on
-  the external flash of a hub, and `PybricksHub.list_flash_files()`,
-  `read_flash_file()` and `write_flash_file()` behind them.
+- Added `pybricksdev files list|get|put|remove` for working with the files
+  stored on the external flash of a hub, and `PybricksHub.list_flash_files()`,
+  `read_flash_file()`, `write_flash_file()` and `remove_flash_file()` behind
+  them.
 - Added `Command.WRITE_FLASH_FILE`, `Command.READ_FLASH_FILE` and
   `Event.FLASH_FILE_DATA` to `pybricksdev.ble.pybricks`.
 
