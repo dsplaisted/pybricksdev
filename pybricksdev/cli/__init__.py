@@ -501,13 +501,18 @@ class FilesPut(Tool):
             "path",
             metavar="<path>",
             nargs="?",
-            help="where to put it on the hub, defaulting to the name of the file",
+            help="where to put it on the hub; a path ending in / is a folder "
+            "to put it in, and leaving this out puts it in the root",
         )
 
     async def run(self, args: argparse.Namespace):
         file = Path(args.file)
         data = file.read_bytes()
-        path = args.path or "/" + file.name
+
+        # A folder says where to put it, rather than what to call it.
+        path = args.path or "/"
+        if path.endswith("/"):
+            path += file.name
 
         hub = await _connect_hub(args.conntype, args.name, args.timeout)
 
