@@ -6,7 +6,7 @@ import contextlib
 import logging
 import os
 import struct
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, NamedTuple, TypeVar
 
 import reactivex.operators as op
 import semver
@@ -42,6 +42,9 @@ from pybricksdev.ble.pybricks import (
     SW_REV_UUID,
     Command,
     Event,
+    FlashFileReadOp,
+    FlashFileReply,
+    FlashFileWriteOp,
     HubCapabilityFlag,
     StatusFlag,
     UserProgramId,
@@ -63,6 +66,36 @@ from pybricksdev.usb.pybricks import (
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+FLASH_FILE_READ_SIZE = 512
+"""How much of a file to ask the hub for at a time.
+
+Each request costs a round trip whatever it carries, so this is as much as
+the hub will read at once.
+"""
+
+# Which step of a request failed, for an error reply.
+_FLASH_FILE_STEPS = {
+    1: "open the directory",
+    2: "read an entry",
+    3: "send the listing",
+    4: "open the file",
+    5: "send the data",
+}
+
+
+class FlashFileInfo(NamedTuple):
+    """One entry of a directory of the external flash file system."""
+
+    name: str
+    """The name of the entry."""
+
+    size: int
+    """The size of a file in bytes, or 0 for a directory."""
+
+    is_dir: bool
+    """Whether the entry is a directory."""
 
 
 class HubDisconnectError(RuntimeError):
@@ -167,6 +200,9 @@ class PybricksHub:
 
         self.hub_kind: HubKind
         self.hub_variant: int
+
+        # Answers to file system requests, which arrive as events.
+        self._flash_file_queue = asyncio.Queue()
 
         # File handle for logging
         self.log_file = None
@@ -282,6 +318,8 @@ class PybricksHub:
 
             if self._enable_line_handler:
                 self._handle_line_data(payload)
+        elif data[0] == Event.FLASH_FILE_DATA:
+            self._flash_file_queue.put_nowait(bytes(data[1:]))
 
     def _handle_disconnect(self):
         logger.info("Disconnected!")
@@ -693,6 +731,149 @@ class PybricksHub:
         if wait:
             await self._wait_for_user_program_stop()
 
+    async def _flash_file_command(self, *payload: bytes) -> None:
+        """Sends one file system command and waits for the hub to accept it."""
+        await self.write_gatt_char(
+            PYBRICKS_COMMAND_EVENT_UUID, b"".join(payload), response=True
+        )
+
+    async def _flash_file_answer(self, what: str, timeout: float = 30) -> bytes:
+        """Gathers the pieces of one answer to a file system request.
+
+        Args:
+            what: What was asked for, to describe a failure.
+            timeout: Seconds to wait for each piece.
+
+        Returns:
+            The answer, with the pieces joined back together.
+
+        Raises:
+            RuntimeError: The hub could not do it.
+        """
+        data = bytearray()
+
+        while True:
+            reply = await self.race_disconnect(
+                asyncio.wait_for(self._flash_file_queue.get(), timeout)
+            )
+
+            kind = reply[0]
+
+            if kind == FlashFileReply.DATA:
+                data.extend(reply[1:])
+            elif kind == FlashFileReply.END:
+                return bytes(data)
+            elif kind == FlashFileReply.ERROR:
+                step = _FLASH_FILE_STEPS.get(reply[1], f"step {reply[1]}")
+                raise RuntimeError(
+                    f"hub failed to {what}: error {reply[2]} while trying to {step}"
+                )
+            else:
+                raise RuntimeError(f"hub sent an unknown reply: {kind}")
+
+    async def list_flash_files(self, path: str = "/") -> list[FlashFileInfo]:
+        """Lists a directory of the external flash file system of the hub.
+
+        Args:
+            path: The directory to list.
+
+        Returns:
+            What the directory holds, in the order the hub reports it.
+
+        Raises:
+            RuntimeError: The hub could not list the directory.
+        """
+        await self._flash_file_command(
+            bytes([Command.READ_FLASH_FILE, FlashFileReadOp.LIST]), path.encode()
+        )
+
+        listing = await self._flash_file_answer(f"list {path}")
+
+        entries = []
+
+        for line in listing.decode().splitlines():
+            # Each line is the kind, the size and the name, separated by spaces.
+            kind, size, name = line.split(" ", 2)
+            entries.append(FlashFileInfo(name, int(size), kind == "d"))
+
+        return entries
+
+    async def read_flash_file(
+        self,
+        path: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> bytes:
+        """Reads a file from the external flash file system of the hub.
+
+        Args:
+            path: The file to read.
+            progress: Called with the number of bytes read so far.
+
+        Returns:
+            The contents of the file.
+
+        Raises:
+            RuntimeError: The hub could not read the file.
+        """
+        data = bytearray()
+
+        while True:
+            await self._flash_file_command(
+                bytes([Command.READ_FLASH_FILE, FlashFileReadOp.READ]),
+                struct.pack("<IH", len(data), FLASH_FILE_READ_SIZE),
+                path.encode(),
+            )
+
+            piece = await self._flash_file_answer(f"read {path}")
+            data.extend(piece)
+
+            if progress is not None:
+                progress(len(data))
+
+            # The hub gives all that was asked for until the end of the file.
+            if len(piece) < FLASH_FILE_READ_SIZE:
+                return bytes(data)
+
+    async def write_flash_file(
+        self,
+        path: str,
+        data: bytes,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Writes a file to the external flash file system of the hub.
+
+        Anything already at that path is replaced.
+
+        Args:
+            path: Where to put the file.
+            data: What to write.
+            progress: Called with the number of bytes written so far.
+
+        Raises:
+            RuntimeError: The hub could not write the file.
+        """
+        await self._flash_file_command(
+            bytes([Command.WRITE_FLASH_FILE, FlashFileWriteOp.OPEN]), path.encode()
+        )
+
+        # Two bytes of each message go to the command and the operation.
+        size = self._max_write_size - 2
+        sent = 0
+
+        while sent < len(data):
+            piece = data[sent : sent + size]
+            await self._flash_file_command(
+                bytes([Command.WRITE_FLASH_FILE, FlashFileWriteOp.APPEND]), piece
+            )
+            sent += len(piece)
+
+            if progress is not None:
+                progress(sent)
+
+        await self._flash_file_command(
+            bytes([Command.WRITE_FLASH_FILE, FlashFileWriteOp.CLOSE])
+        )
+
     async def race_power_button_press(self, awaitable: Awaitable[T]) -> T:
         """
         Races an awaitable against the user pressing the power button of the hub.
@@ -831,6 +1012,9 @@ class PybricksHubBLE(PybricksHub):
 
         self._device = device
 
+        # Keeps a request for faster connection parameters alive, on Windows.
+        self._connection_parameters_request = None
+
         def handle_disconnect(_: BleakClient):
             self._handle_disconnect()
 
@@ -850,6 +1034,8 @@ class PybricksHubBLE(PybricksHub):
         logger.info(f"Connecting to {self._device.name}")
         await self._client.connect()
         logger.info("Connected successfully!")
+
+        self._request_fast_connection()
 
         fw_version = await self.read_gatt_char(FW_REV_UUID)
         self.fw_version = Version(fw_version.decode())
@@ -885,6 +1071,31 @@ class PybricksHubBLE(PybricksHub):
             self._legacy_stdio = True
 
         return True
+
+    def _request_fast_connection(self) -> None:
+        """Asks Windows for a connection meant for throughput.
+
+        Windows relaxes the connection parameters after about ten seconds of
+        a quiet connection, after which every message waits about four times
+        as long. Asking for throughput keeps it quick, which matters for
+        anything that sends a lot, such as downloading a program or copying
+        a file. Does nothing on other platforms.
+        """
+        try:
+            from winrt.windows.devices.bluetooth import (
+                BluetoothLEPreferredConnectionParameters,
+            )
+
+            device = self._client._backend._requester
+
+            # The request lasts as long as this object does, so keep it.
+            self._connection_parameters_request = (
+                device.request_preferred_connection_parameters(
+                    BluetoothLEPreferredConnectionParameters.throughput_optimized
+                )
+            )
+        except Exception:
+            logger.debug("could not ask for faster connection", exc_info=True)
 
     async def _client_disconnect(self) -> bool:
         return await self._client.disconnect()

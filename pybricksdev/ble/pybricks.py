@@ -134,6 +134,68 @@ class Command(IntEnum):
     .. availability:: Since Pybricks protocol v1.3.0.
     """
 
+    WRITE_FLASH_FILE = 8
+    """
+    Writes a file on the external flash file system of the hub.
+
+    The first byte of the payload selects the operation, which is one of
+    :class:`FlashFileWriteOp`. ``OPEN`` is followed by the path of the file,
+    ``APPEND`` by the bytes to add to it, and ``CLOSE`` takes nothing.
+
+    .. availability:: Since Pybricks protocol v1.6.0.
+    """
+
+    READ_FLASH_FILE = 9
+    """
+    Requests the contents of the external flash file system of the hub.
+
+    The first byte of the payload selects the operation, which is one of
+    :class:`FlashFileReadOp`. ``LIST`` is followed by the path of a
+    directory. ``READ`` is followed by a 32-bit offset, a 16-bit size and
+    the path of a file.
+
+    The answer arrives as one or more :attr:`Event.FLASH_FILE_DATA` events,
+    since a command can only reply with an error code.
+
+    .. availability:: Since Pybricks protocol v1.6.0.
+    """
+
+
+class FlashFileWriteOp(IntEnum):
+    """Operations of :attr:`Command.WRITE_FLASH_FILE`."""
+
+    OPEN = 0
+    """Creates the file, replacing one that is already there."""
+
+    APPEND = 1
+    """Adds the payload to the end of the open file."""
+
+    CLOSE = 2
+    """Finishes writing the open file."""
+
+
+class FlashFileReadOp(IntEnum):
+    """Operations of :attr:`Command.READ_FLASH_FILE`."""
+
+    LIST = 0
+    """Lists the entries of a directory."""
+
+    READ = 1
+    """Reads part of a file."""
+
+
+class FlashFileReply(IntEnum):
+    """First byte of an :attr:`Event.FLASH_FILE_DATA` event."""
+
+    DATA = 0
+    """A piece of the answer, which follows."""
+
+    END = 1
+    """The answer is complete."""
+
+    ERROR = 2
+    """The request failed. The step and the error code follow."""
+
 
 class CommandError(IntEnum):
     """
@@ -195,6 +257,15 @@ class Event(IntEnum):
     the hub.
 
     .. availability:: Since Pybricks protocol v1.3.0.
+    """
+
+    FLASH_FILE_DATA = 4
+    """Part of the answer to a :attr:`Command.READ_FLASH_FILE` request.
+
+    The first byte of the payload is one of :class:`FlashFileReply` and the
+    rest is the data belonging to it.
+
+    .. availability:: Since Pybricks protocol v1.6.0.
     """
 
 

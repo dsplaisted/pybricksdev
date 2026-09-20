@@ -12,6 +12,7 @@ import sys
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from os import PathLike, path
+from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
 from typing import ContextManager, TextIO
 
@@ -19,6 +20,8 @@ import argcomplete
 import questionary
 from argcomplete.completers import FilesCompleter
 from packaging.version import Version
+from tqdm.auto import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from pybricksdev import __name__ as MODULE_NAME
 from pybricksdev import __version__ as MODULE_VERSION
@@ -133,6 +136,92 @@ class Compile(Tool):
         print_mpy(mpy)
 
 
+async def _connect_hub(conntype: str, name: str | None, timeout: float = 10):
+    """Finds a hub and connects to it.
+
+    Args:
+        conntype: Either ``ble`` or ``usb``.
+        name: Bluetooth name or address, or serial port name.
+        timeout: Seconds to search for a hub over Bluetooth.
+
+    Returns:
+        The connected hub.
+    """
+    if conntype == "ble":
+        from pybricksdev.ble import find_device as find_ble
+        from pybricksdev.connections.pybricks import PybricksHubBLE
+
+        # It is a Pybricks Hub with BLE. Device name or address is given.
+        print(f"Searching for {name or 'any hub with Pybricks service'}...")
+        hub = PybricksHubBLE(await find_ble(name, timeout=timeout))
+    elif conntype == "usb":
+        from usb.core import find as find_usb
+
+        from pybricksdev.connections.pybricks import PybricksHubUSB
+        from pybricksdev.usb import (
+            EV3_USB_PID,
+            LEGO_USB_VID,
+            MINDSTORMS_INVENTOR_USB_PID,
+            NXT_USB_PID,
+            SPIKE_ESSENTIAL_USB_PID,
+            SPIKE_PRIME_USB_PID,
+        )
+
+        def is_pybricks_usb(dev):
+            return (
+                (dev.idVendor == LEGO_USB_VID)
+                and (
+                    dev.idProduct
+                    in [
+                        NXT_USB_PID,
+                        EV3_USB_PID,
+                        SPIKE_PRIME_USB_PID,
+                        SPIKE_ESSENTIAL_USB_PID,
+                        MINDSTORMS_INVENTOR_USB_PID,
+                    ]
+                )
+                and dev.product.endswith("Pybricks")
+            )
+
+        device = find_usb(custom_match=is_pybricks_usb)
+
+        if device is None:
+            print("Pybricks Hub not found.", file=sys.stderr)
+            exit(1)
+
+        hub = PybricksHubUSB(device)
+    else:
+        raise ValueError(f"Unknown connection type: {conntype}")
+
+    await hub.connect()
+    return hub
+
+
+def _add_connection_arguments(parser: argparse.ArgumentParser) -> None:
+    """Adds the arguments that say which hub to talk to."""
+    parser.add_argument(
+        "conntype",
+        metavar="<connection type>",
+        help="connection type: %(choices)s",
+        choices=["ble", "usb"],
+    )
+    parser.add_argument(
+        "-n",
+        "--name",
+        metavar="<name>",
+        required=False,
+        help="Bluetooth device name or Bluetooth address for BLE connection; "
+        "serial port name for USB connection",
+    )
+    parser.add_argument(
+        "--timeout",
+        metavar="<seconds>",
+        type=float,
+        default=10,
+        help="how long to search for a hub over Bluetooth (default: %(default)s)",
+    )
+
+
 class Run(Tool):
     def add_parser(self, subparsers: argparse._SubParsersAction):
         parser = subparsers.add_parser(
@@ -184,56 +273,9 @@ class Run(Tool):
 
     async def run(self, args: argparse.Namespace):
 
-        # Pick the right connection
-        if args.conntype == "ble":
-            from pybricksdev.ble import find_device as find_ble
-            from pybricksdev.connections.pybricks import PybricksHubBLE
+        hub = await _connect_hub(args.conntype, args.name)
 
-            # It is a Pybricks Hub with BLE. Device name or address is given.
-            print(f"Searching for {args.name or 'any hub with Pybricks service'}...")
-            device_or_address = await find_ble(args.name)
-            hub = PybricksHubBLE(device_or_address)
-        elif args.conntype == "usb":
-            from usb.core import find as find_usb
-
-            from pybricksdev.connections.pybricks import PybricksHubUSB
-            from pybricksdev.usb import (
-                EV3_USB_PID,
-                LEGO_USB_VID,
-                MINDSTORMS_INVENTOR_USB_PID,
-                NXT_USB_PID,
-                SPIKE_ESSENTIAL_USB_PID,
-                SPIKE_PRIME_USB_PID,
-            )
-
-            def is_pybricks_usb(dev):
-                return (
-                    (dev.idVendor == LEGO_USB_VID)
-                    and (
-                        dev.idProduct
-                        in [
-                            NXT_USB_PID,
-                            EV3_USB_PID,
-                            SPIKE_PRIME_USB_PID,
-                            SPIKE_ESSENTIAL_USB_PID,
-                            MINDSTORMS_INVENTOR_USB_PID,
-                        ]
-                    )
-                    and dev.product.endswith("Pybricks")
-                )
-
-            device_or_address = find_usb(custom_match=is_pybricks_usb)
-
-            if device_or_address is None:
-                print("Pybricks Hub not found.", file=sys.stderr)
-                exit(1)
-
-            hub = PybricksHubUSB(device_or_address)
-        else:
-            raise ValueError(f"Unknown connection type: {args.conntype}")
-
-        # Connect to the address and run the script
-        await hub.connect()
+        # Run the script
         try:
             with _get_script_path(args.file) as script_path:
                 if args.start:
@@ -262,17 +304,8 @@ class Run(Tool):
                 ).ask_async():
                     exit()
 
-                if args.conntype == "ble":
-                    print(
-                        f"Searching for {args.name or 'any hub with Pybricks service'}..."
-                    )
-                    device_or_address = await find_ble(args.name)
-                    hub = PybricksHubBLE(device_or_address)
-                elif args.conntype == "usb":
-                    device_or_address = find_usb(custom_match=is_pybricks_usb)
-                    hub = PybricksHubUSB(device_or_address)
+                hub = await _connect_hub(args.conntype, args.name)
 
-                await hub.connect()
                 # re-enable echoing of the hub's stdout
                 hub._enable_line_handler = True
                 hub.print_output = True
@@ -377,6 +410,148 @@ class Run(Tool):
 
         finally:
             await hub.disconnect()
+
+
+class FilesList(Tool):
+    def add_parser(self, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(
+            "list",
+            help="list the files on a hub",
+        )
+        parser.tool = self
+        _add_connection_arguments(parser)
+        parser.add_argument(
+            "path",
+            metavar="<path>",
+            nargs="?",
+            default="/",
+            help="directory to list, defaulting to the root",
+        )
+
+    async def run(self, args: argparse.Namespace):
+        hub = await _connect_hub(args.conntype, args.name, args.timeout)
+
+        try:
+            entries = await hub.list_flash_files(args.path)
+        finally:
+            await hub.disconnect()
+
+        for entry in entries:
+            if entry.is_dir:
+                print(f"{'':>10}  {entry.name}/")
+            else:
+                print(f"{entry.size:>10}  {entry.name}")
+
+
+class FilesGet(Tool):
+    def add_parser(self, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(
+            "get",
+            help="download a file from a hub",
+        )
+        parser.tool = self
+        _add_connection_arguments(parser)
+        parser.add_argument(
+            "path",
+            metavar="<path>",
+            help="file on the hub to download",
+        )
+        parser.add_argument(
+            "dest",
+            metavar="<dest>",
+            nargs="?",
+            help="where to save it, defaulting to the name of the file",
+        )
+
+    async def run(self, args: argparse.Namespace):
+        hub = await _connect_hub(args.conntype, args.name, args.timeout)
+
+        try:
+            with (
+                logging_redirect_tqdm(),
+                tqdm(total=None, unit="B", unit_scale=True, unit_divisor=1024) as pbar,
+            ):
+
+                def progress(size: int) -> None:
+                    pbar.update(size - pbar.n)
+
+                data = await hub.read_flash_file(args.path, progress)
+        finally:
+            await hub.disconnect()
+
+        dest = Path(args.dest or PurePosixPath(args.path).name)
+        dest.write_bytes(data)
+        print(f"Wrote {len(data)} bytes to {dest}.")
+
+
+class FilesPut(Tool):
+    def add_parser(self, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(
+            "put",
+            help="upload a file to a hub",
+        )
+        parser.tool = self
+        _add_connection_arguments(parser)
+        parser.add_argument(
+            "file",
+            metavar="<file>",
+            help="file to upload",
+        ).completer = FilesCompleter()
+        parser.add_argument(
+            "path",
+            metavar="<path>",
+            nargs="?",
+            help="where to put it on the hub, defaulting to the name of the file",
+        )
+
+    async def run(self, args: argparse.Namespace):
+        file = Path(args.file)
+        data = file.read_bytes()
+        path = args.path or "/" + file.name
+
+        hub = await _connect_hub(args.conntype, args.name, args.timeout)
+
+        try:
+            with (
+                logging_redirect_tqdm(),
+                tqdm(
+                    total=len(data), unit="B", unit_scale=True, unit_divisor=1024
+                ) as pbar,
+            ):
+
+                def progress(size: int) -> None:
+                    pbar.update(size - pbar.n)
+
+                await hub.write_flash_file(path, data, progress)
+        finally:
+            await hub.disconnect()
+
+        print(f"Wrote {len(data)} bytes to {path} on the hub.")
+
+
+class Files(Tool):
+    def add_parser(self, subparsers: argparse._SubParsersAction):
+        self.parser = subparsers.add_parser(
+            "files",
+            help="work with the files stored on a hub",
+        )
+        self.parser.tool = self
+        self.subparsers = self.parser.add_subparsers(
+            metavar="<action>",
+            dest="action",
+            help="the action to take",
+        )
+
+        for tool in FilesList(), FilesGet(), FilesPut():
+            tool.add_parser(self.subparsers)
+
+    def run(self, args: argparse.Namespace):
+        if args.action not in self.subparsers.choices:
+            self.parser.error(
+                f'Missing name of action: {"|".join(self.subparsers.choices.keys())}'
+            )
+
+        return self.subparsers.choices[args.action].tool.run(args)
 
 
 class Flash(Tool):
@@ -603,7 +778,16 @@ def main():
         help="the tool to use",
     )
 
-    for tool in Compile(), Run(), Flash(), DFU(), OAD(), LWP3(), Udev():
+    for tool in (
+        Compile(),
+        Run(),
+        Files(),
+        Flash(),
+        DFU(),
+        OAD(),
+        LWP3(),
+        Udev(),
+    ):
         tool.add_parser(subparsers)
 
     argcomplete.autocomplete(parser)
